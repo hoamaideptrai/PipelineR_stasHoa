@@ -1,0 +1,448 @@
+data <- #chèn data từ file excel, csv . . . nên để dạng long data trước nếu không thêm bước chỉnh về long data
+
+
+setup_packages <- function() {
+  packages <- c("tidyverse", "car", "dunn.test", "ggplot2", 
+                "gridExtra", "knitr", "rmarkdown")
+  
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+      install.packages(pkg, dependencies = TRUE)
+      library(pkg, character.only = TRUE)
+    }
+  }
+  
+  cat("✓ Đã load tất cả packages cần thiết\n\n")
+}
+
+setup_packages()
+
+
+auto_analyze <- function(data, 
+                         group_col = "CMC",                        #Thay thế Conc bằng tên khác miễn là biến ko phụ thuộc
+                         output_dir = "analysis_results",
+                         save_plots = TRUE,
+                         save_report = TRUE) {
+ 
+  cat("║  PIPELINE PHÂN TÍCH DỮ LIỆU   ║\n")
+
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+
+cat("  - Số dòng:", nrow(data), "\n")
+cat("  - Số cột:", ncol(data), "\n")
+cat("  - Tên cột:", paste(names(data), collapse = ", "), "\n\n")
+  
+  # Xác định cột nhóm và các biến phụ thuộc
+  if (!group_col %in% names(data)) {
+    stop(paste("❌ Không tìm thấy cột nhóm:", group_col))
+  }
+  
+  dependent_vars <- setdiff(names(data), group_col)
+  cat("✓ Cột nhóm:", group_col, "\n")
+  cat("✓ Biến phụ thuộc:", paste(dependent_vars, collapse = ", "), "\n\n")
+  
+  # Tạo danh sách lưu kết quả
+  results <- list(
+    data = data,
+    group_col = group_col,
+    dependent_vars = dependent_vars,
+    warnings = list(),
+    statistics = list(),
+    plots = list()
+  )
+
+print(results)
+
+  cat("\n🔍 BƯỚC 2: KIỂM TRA CHẤT LƯỢNG DỮ LIỆU\n")
+  cat("─────────────────────────────────────────\n")
+  
+  for (var in dependent_vars) {
+    cat("\n📊 Biến:", var, "\n")
+    
+    # Cấu trúc dữ liệu
+    structure_check <- data %>%
+      group_by(!!sym(group_col)) %>%
+      summarise(
+        n = n(),
+        unique_values = length(unique(!!sym(var))),
+        all_identical = length(unique(!!sym(var))) == 1,
+        has_missing = any(is.na(!!sym(var))),
+        mean = mean(!!sym(var), na.rm = TRUE),
+        sd = sd(!!sym(var), na.rm = TRUE),
+        cv_percent = (sd / mean) * 100,
+        min = min(!!sym(var), na.rm = TRUE),
+        max = max(!!sym(var), na.rm = TRUE),
+        .groups = 'drop'
+      )
+
+    
+print(structure_check)
+
+warnings <- c()
+
+if (any(structure_check$n < 3)) {
+  groups <- structure_check[[group_col]][structure_check$n < 3]
+  warnings <- c(warnings, 
+                paste("⚠️ Nhóm", paste(groups, collapse=", "), "có n < 3"))
+}
+
+if (any(structure_check$all_identical, na.rm = TRUE)) {
+  groups <- structure_check[[group_col]][structure_check$all_identical]
+  warnings <- c(warnings,
+                paste("⚠️ Nhóm", paste(groups, collapse=", "), "có giá trị giống nhau"))
+}
+
+if (any(structure_check$cv_percent > 20, na.rm = TRUE)) {
+  groups <- structure_check[[group_col]][structure_check$cv_percent > 20]
+  warnings <- c(warnings,
+                paste("⚠️ Nhóm", paste(groups, collapse=", "), "có CV > 20% biến thiên cao"))
+}
+
+if (any(structure_check$has_missing)) {
+  groups <- structure_check[[group_col]][structure_check$has_missing]
+  warnings <- c(warnings,
+                paste("⚠️ Nhóm", paste(groups, collapse=", "), "có missing data"))
+}
+
+# In cảnh báo
+if (length(warnings) > 0) {
+  cat("\n🚨 CẢNH BÁO:\n")
+  for (w in warnings) cat("  ", w, "\n")
+  results$warnings[[var]] <- warnings
+} else {
+  cat("\n✓ Không có vấn đề nghiêm trọng\n")
+}
+
+results$statistics[[var]]$structure <- structure_check
+  }
+  
+  cat("\n\n🔎 BƯỚC 3: PHÁT HIỆN OUTLIERS\n")
+  cat("─────────────────────────────────────────\n")
+  
+  for (var in dependent_vars) {
+    cat("\n📊 Biến:", var, "\n")
+    
+    outliers_info <- list()
+    total_outliers <- 0
+    
+    for (grp in unique(data[[group_col]])) {
+      values <- data[[var]][data[[group_col]] == grp & !is.na(data[[var]])]
+      
+      if (length(values) < 3) next
+      
+      Q1 <- quantile(values, 0.25)
+      Q3 <- quantile(values, 0.75)
+      IQR_val <- Q3 - Q1
+      
+      lower <- Q1 - 1.5 * IQR_val
+      upper <- Q3 + 1.5 * IQR_val
+      
+      outliers <- values[values < lower | values > upper]
+      
+      if (length(outliers) > 0) {
+        cat("  Nhóm", grp, ": Có", length(outliers), "outlier(s) -",
+            round(outliers, 2), "\n")
+        outliers_info[[as.character(grp)]] <- outliers
+        total_outliers <- total_outliers + length(outliers)
+      }
+    }
+    
+    if (total_outliers == 0) {
+      cat("✓ Không phát hiện outliers\n")
+    } else {
+      cat("\n⚠️ Tổng cộng:", total_outliers, "outliers\n")
+    }
+    
+    results$statistics[[var]]$outliers <- outliers_info
+  }
+  
+  # ========================================================================
+  # BƯỚC 4: KIỂM TRA GIẢ ĐỊNH
+  # ========================================================================
+  
+  cat("\n\n📋 BƯỚC 4: KIỂM TRA GIẢ ĐỊNH THỐNG KÊ\n")
+  cat("─────────────────────────────────────────\n")
+  
+  for (var in dependent_vars) {
+    cat("\n📊 Biến:", var, "\n\n")
+    
+    # 4.1 Kiểm tra phân phối chuẩn
+    cat("  [1] Shapiro-Wilk test (Phân phối chuẩn):\n")
+    
+    normality_results <- data.frame()
+    
+    for (grp in unique(data[[group_col]])) {
+      values <- data[[var]][data[[group_col]] == grp & !is.na(data[[var]])]
+      
+      if (length(values) >= 3 && length(unique(values)) > 1 && sd(values) > 0) {
+        test <- tryCatch(
+          shapiro.test(values),
+          error = function(e) list(statistic = NA, p.value = NA)
+        )
+        
+        normality_results <- rbind(
+          normality_results,
+          data.frame(
+            Group = grp,
+            n = length(values),
+            W = round(test$statistic, 4),
+            p_value = round(test$p.value, 4),
+            Normal = ifelse(test$p.value > 0.05, "✓ Chuẩn", "✗ Không chuẩn")
+          )
+        )
+      }
+    }
+    
+    print(normality_results)
+    
+    non_normal_count <- sum(normality_results$p_value < 0.05, na.rm = TRUE)
+    
+    if (non_normal_count > 0) {
+      cat("\n  ⚠️ Có", non_normal_count, "nhóm không phân phối chuẩn\n")
+      cat("  → Khuyến nghị: Kruskal-Wallis test\n")
+    } else {
+      cat("\n  ✓ Tất cả nhóm phân phối chuẩn\n")
+    }
+    
+    results$statistics[[var]]$normality <- normality_results
+    
+    # Kiểm tra phương sai đồng nhất
+    cat("\n  [2] Levene's test (Phương sai đồng nhất):\n")
+    
+    formula_str <- as.formula(paste(var, "~ factor(", group_col, ")"))
+    levene_result <- leveneTest(formula_str, data = data)
+    print(levene_result)
+    
+    levene_p <- levene_result$`Pr(>F)`[1]
+    
+    if (levene_p > 0.05) {
+      cat("\n  ✓ Phương sai đồng nhất (p =", round(levene_p, 4), ")\n")
+    } else {
+      cat("\n  ⚠️ Phương sai không đồng nhất (p =", round(levene_p, 4), ")\n")
+      cat("  → Khuyến nghị: Welch's ANOVA\n")
+    }
+    
+    results$statistics[[var]]$levene <- levene_result
+    results$statistics[[var]]$levene_p <- levene_p
+    results$statistics[[var]]$non_normal_count <- non_normal_count
+  }
+  
+  cat("\n\n📊 BƯỚC 5: PHÂN TÍCH THỐNG KÊ\n")
+  cat("─────────────────────────────────────────\n")
+  
+  for (var in dependent_vars) {
+    cat("\n" , rep("═", 60), "\n", sep = "")
+    cat("BIẾN:", var, "\n")
+    cat(rep("═", 60), "\n\n", sep = "")
+    
+    non_normal <- results$statistics[[var]]$non_normal_count
+    levene_p <- results$statistics[[var]]$levene_p
+    
+
+    if (non_normal > 0) {
+      # KRUSKAL-WALLIS TEST
+      cat("→ Phương pháp: Kruskal-Wallis test (dữ liệu không chuẩn)\n\n")
+      
+      kw_result <- kruskal.test(data[[var]] ~ factor(data[[group_col]]))
+      print(kw_result)
+      
+      results$statistics[[var]]$test_used <- "Kruskal-Wallis"
+      results$statistics[[var]]$main_result <- kw_result
+      
+      if (kw_result$p.value < 0.05) {
+        cat("\n✅ KẾT LUẬN: Có sự khác biệt có ý nghĩa thống kê (p < 0.05)\n")
+        cat("\n→ Thực hiện Dunn's post-hoc test:\n\n")
+        
+        dunn_result <- dunn.test(data[[var]], factor(data[[group_col]]),
+                                 method = "bonferroni",
+                                 list = TRUE,
+                                 table = TRUE)
+        
+        results$statistics[[var]]$posthoc <- dunn_result
+        results$statistics[[var]]$significant <- TRUE
+        
+      } else {
+        cat("\n❌ KẾT LUẬN: Không có sự khác biệt có ý nghĩa (p ≥ 0.05)\n")
+        results$statistics[[var]]$significant <- FALSE
+      }
+      
+    } else if (levene_p < 0.05) {
+      # WELCH'S ANOVA
+      cat("→ Phương pháp: Welch's ANOVA (phương sai không đồng nhất)\n\n")
+      
+      formula_str <- as.formula(paste(var, "~ factor(", group_col, ")"))
+      welch_result <- oneway.test(formula_str, data = data)
+      print(welch_result)
+      
+      results$statistics[[var]]$test_used <- "Welch's ANOVA"
+      results$statistics[[var]]$main_result <- welch_result
+      
+      if (welch_result$p.value < 0.05) {
+        cat("\n✅ KẾT LUẬN: Có sự khác biệt có ý nghĩa thống kê (p < 0.05)\n")
+        cat("\n→ Gợi ý: Sử dụng Games-Howell post-hoc test\n")
+        cat("   (Cần package 'rstatix')\n")
+        results$statistics[[var]]$significant <- TRUE
+      } else {
+        cat("\n❌ KẾT LUẬN: Không có sự khác biệt có ý nghĩa (p ≥ 0.05)\n")
+        results$statistics[[var]]$significant <- FALSE
+      }
+      
+    } else {
+      # ONE-WAY ANOVA
+      cat("→ Phương pháp: One-way ANOVA (đáp ứng đầy đủ giả định)\n\n")
+      
+      formula_str <- as.formula(paste(var, "~ factor(", group_col, ")"))
+      anova_result <- aov(formula_str, data = data)
+      print(summary(anova_result))
+      
+      results$statistics[[var]]$test_used <- "One-way ANOVA"
+      results$statistics[[var]]$main_result <- anova_result
+      
+      anova_p <- summary(anova_result)[[1]][["Pr(>F)"]][1]
+      
+      if (anova_p < 0.05) {
+        cat("\n✅ KẾT LUẬN: Có sự khác biệt có ý nghĩa thống kê (p < 0.05)\n")
+        cat("\n→ Thực hiện Tukey HSD post-hoc test:\n\n")
+        
+        tukey_result <- TukeyHSD(anova_result)
+        print(tukey_result)
+        
+        results$statistics[[var]]$posthoc <- tukey_result
+        results$statistics[[var]]$significant <- TRUE
+        
+      } else {
+        cat("\n❌ KẾT LUẬN: Không có sự khác biệt có ý nghĩa (p ≥ 0.05)\n")
+        results$statistics[[var]]$significant <- FALSE
+      }
+    }
+    
+    cat("\n")
+  }
+  
+  if (save_plots) {
+    cat("\n📈 BƯỚC 6: TẠO BIỂU ĐỒ\n")
+    cat("─────────────────────────────────────────\n")
+    
+    # Chuyển đổi dữ liệu sang long format
+    data_long <- data %>%
+      pivot_longer(cols = all_of(dependent_vars),
+                   names_to = "Variable",
+                   values_to = "Value")
+    
+    # Boxplot
+    p1 <- ggplot(data_long, aes(x = factor(!!sym(group_col)), y = Value, 
+                                fill = Variable)) +
+      geom_boxplot(alpha = 0.7, outlier.color = "red", outlier.size = 2) +
+      geom_jitter(width = 0.15, size = 1.5, alpha = 0.4) +
+      facet_wrap(~Variable, scales = "free_y") +
+      labs(title = "Phân bố giá trị theo nhóm",
+           x = group_col,
+           y = "Giá trị") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+            legend.position = "none")
+    
+    results$plots$boxplot <- p1
+    box1 <- results$plots$boxplot
+
+    # Line plot với error bars
+    stats_plot <- data_long %>%
+      group_by(!!sym(group_col), Variable) %>%
+      summarise(
+        Mean = mean(Value, na.rm = TRUE),
+        SE = sd(Value, na.rm = TRUE) / sqrt(n()),
+        .groups = 'drop'
+      )
+    
+    p2 <- ggplot(stats_plot, aes(x = !!sym(group_col), y = Mean, 
+                                 color = Variable, group = Variable)) +
+      geom_line(linewidth = 1) +
+      geom_point(size = 3) +
+      geom_errorbar(aes(ymin = Mean - SE, ymax = Mean + SE),
+                    width = 0.2, size = 0.8) +
+      labs(title = "Xu hướng (Mean ± SE)",
+           x = group_col,
+           y = "Mean ± SE") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+            legend.position = "bottom")
+    
+    results$plots$lineplot <- p2
+    line1 <- results$plots$lineplot
+  }
+  
+  cat("\n\n📋 BƯỚC 7: TẠO BÁO CÁO TÓM TẮT\n")
+  cat("─────────────────────────────────────────\n")
+  
+  summary_text <- generate_summary(results)
+  
+  cat(summary_text)
+  
+  if (save_report) {
+    report_file <- file.path(output_dir, "analysis_report.txt")
+    writeLines(summary_text, report_file)
+    cat("\n✓ Đã lưu báo cáo vào:", report_file, "\n")
+  }
+  
+  cat("📊 Số biến phân tích:", length(dependent_vars), "\n")
+  cat("🔢 Tổng số nhóm:", length(unique(data[[group_col]])), "\n\n")
+  
+  invisible(results)
+}
+
+generate_summary <- function(results) {
+  lines <- c()
+  
+  lines <- c(lines, "╔════════════════════════════════════════════════════════════╗")
+  lines <- c(lines, "║              BÁO CÁO PHÂN TÍCH THỐNG KÊ                    ║")
+  lines <- c(lines, "╚════════════════════════════════════════════════════════════╝\n")
+  
+  lines <- c(lines, paste("Ngày phân tích:", Sys.time()))
+  lines <- c(lines, paste("Số biến:", length(results$dependent_vars)))
+  lines <- c(lines, paste("Biến phân tích:", paste(results$dependent_vars, collapse = ", ")))
+  lines <- c(lines, paste("Cột nhóm:", results$group_col))
+  lines <- c(lines, paste("Số nhóm:", length(unique(results$data[[results$group_col]]))))
+  lines <- c(lines, paste("Tổng số mẫu:", nrow(results$data)))
+  
+  for (var in results$dependent_vars) {
+    lines <- c(lines, rep("─", 2))
+    lines <- c(lines, paste("BIẾN:", var))
+    lines <- c(lines, rep("─", 2))
+
+    if (!is.null(results$warnings[[var]]) && length(results$warnings[[var]]) > 0) {
+      lines <- c(lines, "\n🚨 CẢNH BÁO:")
+      for (w in results$warnings[[var]]) {
+        lines <- c(lines, paste("  ", w))
+      }
+    }
+    
+
+    if (length(results$statistics[[var]]$outliers) > 0) {
+      lines <- c(lines, paste("\n⚠️ Outliers:", 
+                              sum(sapply(results$statistics[[var]]$outliers, length))))
+    }
+    
+    lines <- c(lines, paste("\n📊 Phương pháp:", 
+                            results$statistics[[var]]$test_used))
+  
+    if (results$statistics[[var]]$significant) {
+      lines <- c(lines, "✅ Kết luận: CÓ SỰ KHÁC BIỆT CÓ Ý NGHĨA THỐNG KÊ")
+    } else {
+      lines <- c(lines, "❌ Kết luận: KHÔNG CÓ SỰ KHÁC BIỆT CÓ Ý NGHĨA")
+    }
+    
+    lines <- c(lines, "\n")
+  }
+  
+  return(paste(lines, collapse = "\n"))
+}
+
+#Chạy phân tích data theo pipeline trên
+results <- auto_analyze(data)
+
+#Hiển thị biểu đồ boxplot và lineplot
+print(line1)
+
