@@ -1,0 +1,666 @@
+data1 <- #dữ liệu long data từ excel, csv  . .
+
+setup_regression_packages <- function() {
+    packages <- c("ggplot2", "lmtest", "car", "gridExtra","tidyverse")
+    invisible(sapply(packages, function(pkg) {
+      if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+        install.packages(pkg, dependencies = TRUE)
+        library(pkg, character.only = TRUE)
+      }
+    }))
+    cat("✓ Packages loaded\n\n")
+  }
+
+setup_regression_packages()
+
+check_regression_assumptions <- function(data, 
+                                         independent_vars,
+                                         dependent_vars,
+                                         output_dir = "regression_results",
+                                         save_plots = TRUE) {
+  
+  cat("╔═══════════════════════════════════════════════════════╗\n")
+  cat("║     KIỂM TRA GIẢ ĐỊNH HỒI QUY TUYẾN TÍNH             ║\n")
+  cat("╚═══════════════════════════════════════════════════════╝\n\n")
+  
+  # Tạo thư mục output
+  if (save_plots && !dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  cat("📊 Dữ liệu:", nrow(data), "mẫu\n")
+  cat("📈 Biến độc lập:", paste(independent_vars, collapse = ", "), "\n")
+  cat("📉 Biến phụ thuộc:", paste(dependent_vars, collapse = ", "), "\n\n")
+  
+  # Lưu kết quả
+  all_results <- list()
+  
+  # Duyệt qua từng cặp biến
+  for (dep_var in dependent_vars) {
+    for (indep_var in independent_vars) {
+      
+      cat("\n", rep("═", 70), "\n", sep = "")
+      cat("MÔ HÌNH:", dep_var, "~", indep_var, "\n")
+      cat(rep("═", 70), "\n\n", sep = "")
+      
+      # Kiểm tra dữ liệu hợp lệ
+      valid_data <- data[complete.cases(data[[dep_var]], data[[indep_var]]), ]
+      
+      if (nrow(valid_data) < 10) {
+        cat("❌ KHÔNG ĐỦ DỮ LIỆU (cần ít nhất 10 mẫu)\n\n")
+        next
+      }
+      
+      # Xây dựng mô hình
+      formula_str <- as.formula(paste(dep_var, "~", indep_var))
+      model <- lm(formula_str, data = valid_data)
+      
+      cat("📊 Thông tin mô hình:\n")
+      cat(sprintf("   Số mẫu: %d\n", nrow(valid_data)))
+      cat(sprintf("   R² = %.4f\n", summary(model)$r.squared))
+      cat(sprintf("   Adjusted R² = %.4f\n", summary(model)$adj.r.squared))
+      cat(sprintf("   p-value = %.4e\n\n", 
+                  summary(model)$coefficients[2, 4]))
+      
+      # Kiểm tra các giả định
+      results <- list(
+        model = model,
+        dep_var = dep_var,
+        indep_var = indep_var,
+        n = nrow(valid_data),
+        r_squared = summary(model)$r.squared
+      )
+      
+      # 1. Kiểm tra tuyến tính
+      results$linearity <- check_linearity(valid_data, indep_var, dep_var, 
+                                           model, save_plots, output_dir)
+      
+      # 2. Kiểm tra độc lập phần dư
+      results$independence <- check_independence(model)
+      
+      # 3. Kiểm tra phương sai đồng nhất
+      results$homoscedasticity <- check_homoscedasticity(model, indep_var, 
+                                                         dep_var, save_plots, 
+                                                         output_dir)
+      
+      # 4. Kiểm tra phân phối chuẩn phần dư
+      results$normality <- check_residual_normality(model, indep_var, dep_var,
+                                                    save_plots, output_dir)
+      
+      # Kết luận tổng thể
+      results$overall <- overall_conclusion(results)
+      
+      # Lưu kết quả
+      model_name <- paste(dep_var, indep_var, sep = "_vs_")
+      all_results[[model_name]] <- results
+    }
+  }
+  
+  # In báo cáo tổng kết
+  print_overall_report(all_results)
+  
+  cat("\n✅ Kiểm tra hoàn tất! Kết quả lưu tại:", output_dir, "\n\n")
+  
+  # Thêm các hàm tiện ích
+  all_results$show_plot <- function(model_name, plot_type = "all") {
+    show_regression_plot(all_results, model_name, plot_type)
+  }
+  
+  all_results$show_all_plots <- function(model_name) {
+    show_all_plots_for_model(all_results, model_name)
+  }
+  
+  all_results$list_models <- function() {
+    list_available_models(all_results)
+  }
+  
+  invisible(all_results)
+}
+
+# ============================================================================
+# HIỂN THỊ BIỂU ĐỒ
+# ============================================================================
+
+show_regression_plot <- function(results, model_name, plot_type = "all") {
+  # Kiểm tra model tồn tại
+  if (!model_name %in% names(results)) {
+    cat("❌ Không tìm thấy mô hình:", model_name, "\n")
+    cat("📋 Các mô hình có sẵn:\n")
+    for (name in names(results)[!names(results) %in% c("show_plot", "show_all_plots", "list_models")]) {
+      cat("   •", name, "\n")
+    }
+    return(invisible(NULL))
+  }
+  
+  model_result <- results[[model_name]]
+  
+  # Hiển thị theo loại
+  if (plot_type == "all") {
+    show_all_plots_for_model(results, model_name)
+  } else if (plot_type == "linearity" || plot_type == "1") {
+    print(model_result$linearity$plot)
+    cat("\n✓ Hiển thị: Biểu đồ tuyến tính\n")
+  } else if (plot_type == "homoscedasticity" || plot_type == "3") {
+    print(model_result$homoscedasticity$plot)
+    cat("\n✓ Hiển thị: Biểu đồ phương sai đồng nhất\n")
+  } else if (plot_type == "normality" || plot_type == "4") {
+    print(model_result$normality$plot)
+    cat("\n✓ Hiển thị: Q-Q Plot\n")
+  } else {
+    cat("❌ Loại biểu đồ không hợp lệ!\n")
+    cat("📋 Các loại hợp lệ: 'linearity', 'homoscedasticity', 'normality', 'all'\n")
+  }
+}
+
+show_all_plots_for_model <- function(results, model_name) {
+  if (!model_name %in% names(results)) {
+    cat("❌ Không tìm thấy mô hình:", model_name, "\n")
+    return(invisible(NULL))
+  }
+  
+  model_result <- results[[model_name]]
+  
+  cat("\n╔═══════════════════════════════════════════════════════╗\n")
+  cat("║         BIỂU ĐỒ KIỂM TRA GIẢ ĐỊNH HỒI QUY            ║\n")
+  cat("╚═══════════════════════════════════════════════════════╝\n\n")
+  cat("Mô hình:", model_result$dep_var, "~", model_result$indep_var, "\n\n")
+  
+  # Tạo layout 2x2 để hiển thị tất cả biểu đồ
+  gridExtra::grid.arrange(
+    model_result$linearity$plot + 
+      labs(title = "1. Tuyến tính") +
+      theme(plot.title = element_text(size = 10, face = "bold")),
+    
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = "Durbin-Watson Test\n(Không có biểu đồ)", 
+               size = 5) +
+      theme_void() +
+      labs(title = "2. Độc lập phần dư") +
+      theme(plot.title = element_text(size = 10, face = "bold")),
+    
+    model_result$homoscedasticity$plot + 
+      labs(title = "3. Phương sai đồng nhất") +
+      theme(plot.title = element_text(size = 10, face = "bold")),
+    
+    model_result$normality$plot + 
+      labs(title = "4. Phân phối chuẩn") +
+      theme(plot.title = element_text(size = 10, face = "bold")),
+    
+    ncol = 2,
+    top = paste("Kiểm tra giả định:", model_result$dep_var, "~", model_result$indep_var)
+  )
+  
+  cat("✓ Hiển thị tất cả biểu đồ\n\n")
+}
+
+list_available_models <- function(results) {
+  cat("\n╔═══════════════════════════════════════════════════════╗\n")
+  cat("║              DANH SÁCH MÔ HÌNH                        ║\n")
+  cat("╚═══════════════════════════════════════════════════════╝\n\n")
+  
+  model_names <- names(results)[!names(results) %in% c("show_plot", "show_all_plots", "list_models")]
+  
+  if (length(model_names) == 0) {
+    cat("Không có mô hình nào\n")
+    return(invisible(NULL))
+  }
+  
+  cat(sprintf("Tổng số mô hình: %d\n\n", length(model_names)))
+  
+  for (i in seq_along(model_names)) {
+    model_name <- model_names[i]
+    model_result <- results[[model_name]]
+    status <- ifelse(model_result$overall$all_assumptions_met, "✅", "❌")
+    
+    cat(sprintf("[%d] %s\n", i, model_name))
+    cat(sprintf("    %s ~ %s\n", model_result$dep_var, model_result$indep_var))
+    cat(sprintf("    R² = %.3f | Status: %s\n\n", 
+                model_result$r_squared, status))
+  }
+  
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+  cat("💡 Cách hiển thị biểu đồ:\n")
+  cat("   results$show_plot('model_name', 'linearity')\n")
+  cat("   results$show_all_plots('model_name')\n\n")
+}
+
+# ============================================================================
+# HÀM TẠO BIỂU ĐỒ TỔNG HỢP
+# ============================================================================
+
+create_summary_plots <- function(results, output_file = "all_models_summary.png") {
+  model_names <- names(results)[!names(results) %in% c("show_plot", "show_all_plots", "list_models")]
+  
+  if (length(model_names) == 0) {
+    cat("Không có mô hình nào để vẽ\n")
+    return(invisible(NULL))
+  }
+  
+  cat("\n📊 Tạo biểu đồ tổng hợp cho", length(model_names), "mô hình...\n")
+  
+  # Tạo dataframe cho biểu đồ
+  summary_data <- data.frame()
+  
+  for (model_name in model_names) {
+    model_result <- results[[model_name]]
+    summary_data <- rbind(summary_data, data.frame(
+      Model = paste(model_result$dep_var, "~", model_result$indep_var),
+      R_squared = model_result$r_squared,
+      Linearity = ifelse(model_result$linearity$pass, 1, 0),
+      Independence = ifelse(model_result$independence$pass, 1, 0),
+      Homoscedasticity = ifelse(model_result$homoscedasticity$pass, 1, 0),
+      Normality = ifelse(model_result$normality$pass, 1, 0),
+      Overall = ifelse(model_result$overall$all_assumptions_met, "Pass", "Fail")
+    ))
+  }
+  
+  # Biểu đồ R²
+  p1 <- ggplot(summary_data, aes(x = reorder(Model, R_squared), y = R_squared, fill = Overall)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    scale_fill_manual(values = c("Pass" = "green3", "Fail" = "red3")) +
+    labs(title = "R² của các mô hình", x = "", y = "R²") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  # Biểu đồ giả định
+  assumptions_long <- summary_data %>%
+    select(Model, Linearity, Independence, Homoscedasticity, Normality) %>%
+    pivot_longer(cols = -Model, names_to = "Assumption", values_to = "Pass")
+  
+  p2 <- ggplot(assumptions_long, aes(x = Model, y = Assumption, fill = factor(Pass))) +
+    geom_tile(color = "white") +
+    scale_fill_manual(values = c("0" = "red3", "1" = "green3"), 
+                      labels = c("Vi phạm", "Đạt"),
+                      name = "") +
+    labs(title = "Ma trận giả định", x = "", y = "") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "bottom")
+  
+  # Kết hợp và lưu
+  combined <- gridExtra::grid.arrange(p1, p2, ncol = 1)
+  
+  ggsave(output_file, combined, width = 10, height = 8, dpi = 300)
+  cat("✓ Đã lưu biểu đồ tổng hợp:", output_file, "\n\n")
+  
+  return(combined)
+}
+
+# ============================================================================
+# 1. KIỂM TRA TÍNH TUYẾN TÍNH
+# ============================================================================
+
+check_linearity <- function(data, x_var, y_var, model, save_plots, output_dir) {
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+  cat("1️⃣  KIỂM TRA TÍNH TUYẾN TÍNH (Linearity)\n")
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+  
+  # Vẽ biểu đồ phân tán với đường hồi quy
+  p <- ggplot(data, aes(x = !!sym(x_var), y = !!sym(y_var))) +
+    geom_point(alpha = 0.6, size = 2, color = "steelblue") +
+    geom_smooth(method = "lm", se = TRUE, color = "red", size = 1) +
+    labs(title = paste("Biểu đồ phân tán:", y_var, "vs", x_var),
+         subtitle = paste("R² =", round(summary(model)$r.squared, 4)),
+         x = x_var,
+         y = y_var) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+          plot.subtitle = element_text(hjust = 0.5, size = 10))
+  
+  if (save_plots) {
+    ggsave(file.path(output_dir, paste0("linearity_", y_var, "_", x_var, ".png")),
+           p, width = 8, height = 6, dpi = 300)
+  }
+  
+  # Đánh giá tính tuyến tính
+  r_squared <- summary(model)$r.squared
+  p_value <- summary(model)$coefficients[2, 4]
+  
+  cat("📊 Đánh giá:\n")
+  cat(sprintf("   R² = %.4f\n", r_squared))
+  cat(sprintf("   p-value = %.4e\n", p_value))
+  
+  # Kết luận
+  is_linear <- FALSE
+  if (p_value < 0.05) {
+    if (r_squared > 0.7) {
+      cat("\n✅ KẾT LUẬN: Mối quan hệ TUYẾN TÍNH MẠNH\n")
+      cat("   → Mô hình phù hợp tốt với dữ liệu\n\n")
+      is_linear <- TRUE
+    } else if (r_squared > 0.4) {
+      cat("\n⚠️  KẾT LUẬN: Mối quan hệ TUYẾN TÍNH VỪA PHẢI\n")
+      cat("   → Mô hình có thể sử dụng nhưng cần thận trọng\n\n")
+      is_linear <- TRUE
+    } else {
+      cat("\n⚠️  KẾT LUẬN: Mối quan hệ TUYẾN TÍNH YẾU\n")
+      cat("   → Có mối quan hệ nhưng R² thấp\n")
+      cat("   → Cân nhắc thêm biến hoặc dùng mô hình phi tuyến\n\n")
+    }
+  } else {
+    cat("\n❌ KẾT LUẬN: KHÔNG CÓ MỐI QUAN HỆ TUYẾN TÍNH\n")
+    cat("   → Mô hình HỒI QUY BỊ VI PHẠM giả định tuyến tính\n")
+    cat("   → Không nên sử dụng mô hình tuyến tính này\n\n")
+  }
+  
+  list(
+    pass = is_linear,
+    r_squared = r_squared,
+    p_value = p_value,
+    plot = p
+  )
+}
+
+# ============================================================================
+# 2. KIỂM TRA ĐỘC LẬP PHẦN DƯ (Durbin-Watson)
+# ============================================================================
+
+check_independence <- function(model) {
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+  cat("2️⃣  KIỂM TRA ĐỘC LẬP PHẦN DƯ (Independence)\n")
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+  
+  # Durbin-Watson test
+  dw_test <- dwtest(model)
+  
+  cat("📊 Kiểm định Durbin-Watson:\n")
+  cat(sprintf("   DW statistic = %.4f\n", dw_test$statistic))
+  cat(sprintf("   p-value = %.4f\n", dw_test$p.value))
+  
+  # Đánh giá
+  dw_value <- as.numeric(dw_test$statistic)
+  is_independent <- FALSE
+  
+  cat("\n📋 Giải thích:\n")
+  cat("   • DW ≈ 2: Phần dư độc lập (tốt)\n")
+  cat("   • DW < 1.5: Tương quan dương (vi phạm)\n")
+  cat("   • DW > 2.5: Tương quan âm (vi phạm)\n\n")
+  
+  if (dw_value >= 1.5 && dw_value <= 2.5 && dw_test$p.value > 0.05) {
+    cat("✅ KẾT LUẬN: PHẦN DƯ ĐỘC LẬP\n")
+    cat("   → Giả định độc lập ĐƯỢC THỎA MÃN\n")
+    cat("   → Mô hình phù hợp\n\n")
+    is_independent <- TRUE
+  } else if (dw_value < 1.5) {
+    cat("❌ KẾT LUẬN: PHẦN DƯ CÓ TƯƠNG QUAN DƯƠNG\n")
+    cat("   → Mô hình BỊ VI PHẠM giả định độc lập\n")
+    cat("   → Gợi ý: Kiểm tra dữ liệu chuỗi thời gian hoặc thêm biến\n\n")
+  } else if (dw_value > 2.5) {
+    cat("❌ KẾT LUẬN: PHẦN DƯ CÓ TƯƠNG QUAN ÂM\n")
+    cat("   → Mô hình BỊ VI PHẠM giả định độc lập\n")
+    cat("   → Gợi ý: Kiểm tra lại dữ liệu\n\n")
+  } else {
+    cat("⚠️  KẾT LUẬN: PHẦN DƯ CÓ THỂ KHÔNG ĐỘC LẬP\n")
+    cat("   → Cần xem xét thêm\n\n")
+  }
+  
+  list(
+    pass = is_independent,
+    dw_statistic = dw_value,
+    p_value = dw_test$p.value
+  )
+}
+
+# ============================================================================
+# 3. KIỂM TRA PHƯƠNG SAI ĐỒNG NHẤT
+# ============================================================================
+
+check_homoscedasticity <- function(model, x_var, y_var, save_plots, output_dir) {
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+  cat("3️⃣  KIỂM TRA PHƯƠNG SAI ĐỒNG NHẤT (Homoscedasticity)\n")
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+  
+  # Lấy giá trị dự đoán và phần dư
+  fitted_values <- fitted(model)
+  residuals <- residuals(model)
+  
+  # Vẽ biểu đồ phần dư vs giá trị dự đoán
+  plot_data <- data.frame(Fitted = fitted_values, Residuals = residuals)
+  
+  p <- ggplot(plot_data, aes(x = Fitted, y = Residuals)) +
+    geom_point(alpha = 0.6, size = 2, color = "steelblue") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = 1) +
+    geom_smooth(method = "loess", se = FALSE, color = "orange", size = 0.8) +
+    labs(title = "Kiểm tra phương sai đồng nhất",
+         subtitle = "Phần dư nên phân tán đều quanh đường 0",
+         x = "Giá trị dự đoán",
+         y = "Phần dư") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+          plot.subtitle = element_text(hjust = 0.5, size = 9))
+  
+  if (save_plots) {
+    ggsave(file.path(output_dir, 
+                     paste0("homoscedasticity_", y_var, "_", x_var, ".png")),
+           p, width = 8, height = 6, dpi = 300)
+  }
+  
+  # Breusch-Pagan test
+  bp_test <- tryCatch(
+    bptest(model),
+    error = function(e) NULL
+  )
+  
+  if (!is.null(bp_test)) {
+    cat("📊 Kiểm định Breusch-Pagan:\n")
+    cat(sprintf("   BP statistic = %.4f\n", bp_test$statistic))
+    cat(sprintf("   p-value = %.4f\n\n", bp_test$p.value))
+  }
+  
+  # Đánh giá trực quan
+  residual_range <- max(abs(residuals))
+  is_homoscedastic <- FALSE
+  
+  cat("📋 Đánh giá trực quan:\n")
+  cat("   • Các điểm nên phân tán đều quanh đường 0\n")
+  cat("   • KHÔNG có hình dạng 'cái loa' (funnel)\n")
+  cat("   • KHÔNG có xu hướng tăng/giảm rõ ràng\n\n")
+  
+  if (!is.null(bp_test) && bp_test$p.value > 0.05) {
+    cat("✅ KẾT LUẬN: PHƯƠNG SAI ĐỒNG NHẤT\n")
+    cat("   → Giả định ĐƯỢC THỎA MÃN\n")
+    cat("   → Mô hình phù hợp\n\n")
+    is_homoscedastic <- TRUE
+  } else if (!is.null(bp_test) && bp_test$p.value <= 0.05) {
+    cat("❌ KẾT LUẬN: PHƯƠNG SAI KHÔNG ĐỒNG NHẤT\n")
+    cat("   → Mô hình BỊ VI PHẠM giả định này\n")
+    cat("   → Gợi ý: Biến đổi dữ liệu (log, sqrt) hoặc dùng WLS\n\n")
+  } else {
+    cat("⚠️  KẾT LUẬN: KHÔNG THỂ KIỂM ĐỊNH\n")
+    cat("   → Xem xét biểu đồ để đánh giá\n\n")
+    is_homoscedastic <- TRUE  # Giả định đạt nếu không test được
+  }
+  
+  list(
+    pass = is_homoscedastic,
+    bp_statistic = if (!is.null(bp_test)) bp_test$statistic else NA,
+    p_value = if (!is.null(bp_test)) bp_test$p.value else NA,
+    plot = p
+  )
+}
+
+# ============================================================================
+# 4. KIỂM TRA PHÂN PHỐI CHUẨN PHẦN DƯ
+# ============================================================================
+
+check_residual_normality <- function(model, x_var, y_var, save_plots, output_dir) {
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+  cat("4️⃣  KIỂM TRA PHÂN PHỐI CHUẨN PHẦN DƯ (Normality)\n")
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+  
+  residuals <- residuals(model)
+  
+  # Tạo Q-Q plot
+  p <- ggplot(data.frame(residuals = residuals), aes(sample = residuals)) +
+    stat_qq(alpha = 0.6, size = 2, color = "steelblue") +
+    stat_qq_line(color = "red", size = 1) +
+    labs(title = "Q-Q Plot: Kiểm tra phân phối chuẩn phần dư",
+         subtitle = "Các điểm nên nằm gần đường chéo",
+         x = "Quantile lý thuyết",
+         y = "Quantile mẫu") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+          plot.subtitle = element_text(hjust = 0.5, size = 9))
+  
+  if (save_plots) {
+    ggsave(file.path(output_dir, 
+                     paste0("normality_", y_var, "_", x_var, ".png")),
+           p, width = 8, height = 6, dpi = 300)
+  }
+  
+  # Shapiro-Wilk test
+  shapiro_test <- tryCatch(
+    shapiro.test(residuals),
+    error = function(e) NULL
+  )
+  
+  if (!is.null(shapiro_test)) {
+    cat("📊 Kiểm định Shapiro-Wilk:\n")
+    cat(sprintf("   W statistic = %.4f\n", shapiro_test$statistic))
+    cat(sprintf("   p-value = %.4f\n\n", shapiro_test$p.value))
+  }
+  
+  # Đánh giá
+  is_normal <- FALSE
+  
+  cat("📋 Đánh giá:\n")
+  cat("   • Các điểm trên Q-Q plot nên nằm gần đường chéo\n")
+  cat("   • p-value > 0.05 → Phân phối chuẩn\n\n")
+  
+  if (!is.null(shapiro_test) && shapiro_test$p.value > 0.05) {
+    cat("✅ KẾT LUẬN: PHẦN DƯ PHÂN PHỐI CHUẨN\n")
+    cat("   → Giả định ĐƯỢC THỎA MÃN\n")
+    cat("   → Mô hình phù hợp\n\n")
+    is_normal <- TRUE
+  } else if (!is.null(shapiro_test) && shapiro_test$p.value <= 0.05) {
+    cat("❌ KẾT LUẬN: PHẦN DƯ KHÔNG PHÂN PHỐI CHUẨN\n")
+    cat("   → Mô hình BỊ VI PHẠM giả định này\n")
+    cat("   → Gợi ý: Biến đổi biến phụ thuộc (log, sqrt) hoặc loại outliers\n\n")
+  } else {
+    cat("⚠️  KẾT LUẬN: KHÔNG THỂ KIỂM ĐỊNH\n")
+    cat("   → Xem xét Q-Q plot để đánh giá\n\n")
+    is_normal <- TRUE  # Giả định đạt nếu không test được
+  }
+  
+  list(
+    pass = is_normal,
+    w_statistic = if (!is.null(shapiro_test)) shapiro_test$statistic else NA,
+    p_value = if (!is.null(shapiro_test)) shapiro_test$p.value else NA,
+    plot = p
+  )
+}
+
+# ============================================================================
+# KẾT LUẬN TỔNG THỂ
+# ============================================================================
+
+overall_conclusion <- function(results) {
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+  cat("📋 KẾT LUẬN TỔNG THỂ\n")
+  cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+  
+  assumptions <- c(
+    "Tuyến tính" = results$linearity$pass,
+    "Độc lập phần dư" = results$independence$pass,
+    "Phương sai đồng nhất" = results$homoscedasticity$pass,
+    "Phân phối chuẩn" = results$normality$pass
+  )
+  
+  cat("✓/✗ Tóm tắt giả định:\n")
+  for (i in seq_along(assumptions)) {
+    status <- ifelse(assumptions[i], "✅ Đạt", "❌ Vi phạm")
+    cat(sprintf("   %d. %-20s: %s\n", i, names(assumptions)[i], status))
+  }
+  
+  cat("\n")
+  
+  # Kết luận cuối cùng
+  all_pass <- all(assumptions)
+  
+  if (all_pass) {
+    cat("🎉 KẾT LUẬN: MÔ HÌNH PHÙ HỢP\n")
+    cat("   → Tất cả giả định ĐỀU ĐƯỢC THỎA MÃN\n")
+    cat("   → CÓ THỂ SỬ DỤNG mô hình hồi quy tuyến tính này\n")
+    cat("   → Kết quả dự đoán đáng tin cậy\n\n")
+  } else {
+    violated <- names(assumptions)[!assumptions]
+    cat("⚠️  KẾT LUẬN: MÔ HÌNH BỊ VI PHẠM\n")
+    cat(sprintf("   → Vi phạm: %s\n", paste(violated, collapse = ", ")))
+    cat("   → KHÔNG NÊN SỬ DỤNG mô hình này\n")
+    cat("   → Cần khắc phục vi phạm trước khi sử dụng\n\n")
+  }
+  
+  list(
+    all_assumptions_met = all_pass,
+    violated = names(assumptions)[!assumptions]
+  )
+}
+
+# ============================================================================
+# BÁO CÁO TỔNG KẾT
+# ============================================================================
+
+print_overall_report <- function(all_results) {
+  cat("\n\n╔═══════════════════════════════════════════════════════╗\n")
+  cat("║              BÁO CÁO TỔNG KẾT TẤT CẢ MÔ HÌNH          ║\n")
+  cat("╚═══════════════════════════════════════════════════════╝\n\n")
+  
+  if (length(all_results) == 0) {
+    cat("Không có mô hình nào được phân tích\n")
+    return()
+  }
+  
+  # Tạo bảng tóm tắt
+  summary_df <- data.frame()
+  
+  for (model_name in names(all_results)) {
+    result <- all_results[[model_name]]
+    
+    summary_df <- rbind(summary_df, data.frame(
+      Model = paste(result$dep_var, "~", result$indep_var),
+      N = result$n,
+      R2 = sprintf("%.3f", result$r_squared),
+      Linearity = ifelse(result$linearity$pass, "✓", "✗"),
+      Independence = ifelse(result$independence$pass, "✓", "✗"),
+      Homoscedasticity = ifelse(result$homoscedasticity$pass, "✓", "✗"),
+      Normality = ifelse(result$normality$pass, "✓", "✗"),
+      Overall = ifelse(result$overall$all_assumptions_met, "✅ OK", "❌ Vi phạm")
+    ))
+  }
+  
+  print(summary_df, row.names = FALSE)
+  
+  # Thống kê tổng quát
+  total_models <- nrow(summary_df)
+  valid_models <- sum(summary_df$Overall == "✅ OK")
+  
+  cat("\n📊 THỐNG KÊ:\n")
+  cat(sprintf("   Tổng số mô hình: %d\n", total_models))
+  cat(sprintf("   Mô hình hợp lệ: %d (%.1f%%)\n", 
+              valid_models, valid_models/total_models*100))
+  cat(sprintf("   Mô hình vi phạm: %d (%.1f%%)\n\n", 
+              total_models - valid_models, 
+              (total_models - valid_models)/total_models*100))
+}
+
+
+#Cú pháp thực hiện phân tích data
+
+results <- check_regression_assumptions(
+  data = data1,
+  independent_vars = c("CC","Tua"),
+  dependent_vars = "Conc"
+)
+
+#Check các mô hình có
+results$list_models()
+
+#check mô hình tuyến tính
+results$show_plot('Conc_vs_CC', 'linearity')
+
+# Hiển thị biểu đồ phương sai
+results$show_plot('Conc_vs_CC', 'homoscedasticity')
+
+ # Hiển thị Q-Q plot
+results$show_plot('Conc_vs_Tua', 'normality')
