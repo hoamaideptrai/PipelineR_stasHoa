@@ -1,15 +1,7 @@
 data1 <- #dữ liệu long data từ excel, csv  . .
 
-setup_regression_packages <- function() {
-    packages <- c("ggplot2", "lmtest", "car", "gridExtra","tidyverse")
-    invisible(sapply(packages, function(pkg) {
-      if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
-        install.packages(pkg, dependencies = TRUE)
-        library(pkg, character.only = TRUE)
-      }
-    }))
-    cat("✓ Packages loaded\n\n")
-  }
+if (!require("pacman", quietly = TRUE)) install.packages("pacman")   #update ngắn gọn hơn ban đầu
+pacman::p_load(ggplot2, lmtest, car, gridExtra, tidyr, quietly = TRUE)
 
 setup_regression_packages()
 
