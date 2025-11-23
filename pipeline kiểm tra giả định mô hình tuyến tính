@@ -44,7 +44,7 @@ check_regression_assumptions <- function(data,
       }
       
       # Xây dựng mô hình
-      formula_str <- as.formula(paste(dep_var, "~", indep_var))
+      formula_str <- as.formula(paste0("`", dep_var, "`", " ~ ", "`", indep_var, "`"))
       model <- lm(formula_str, data = valid_data)
       
       cat("📊 Thông tin mô hình:\n")
