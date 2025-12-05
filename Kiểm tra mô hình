@@ -5,359 +5,270 @@ data3 <- data của mình
 if (!require("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(ggplot2, drc, car, gridExtra, tidyr, dplyr, quietly = TRUE)
 
-# ===== HÀM KIỂM TRA VÀ SO SÁNH CÁC MÔ HÌNH =====
 check_models <- function(dataM, 
-                         independent_var,
-                         dependent_vars,
+                         independent_var,      # tên cột nồng độ (ví dụ "Conc")
+                         dependent_vars,       # vector tên các cột đáp ứng (ví dụ c("Inhibition", "Viability"))
                          output_dir = "models_results",
                          save_plots = TRUE) {
   
-  # Tạo thư mục lưu kết quả nếu cần
+  # Tạo thư mục lưu kết quả
   if (save_plots && !dir.exists(output_dir)) {
     dir.create(output_dir, recursive = TRUE)
   }
   
-  # Khởi tạo danh sách lưu kết quả
   results_list <- list()
-  all_plots <- list()
+  all_plots    <- list()
   
-structure <- dataM %>%
-    group_by(!!sym(group_col)) %>%
+  # ==================== TÓM TẮT THỐNG KÊ ====================
+  data_summary <- dataM %>%
+    group_by(!!sym(independent_var)) %>%
     summarise(
-      n = n(),
-      unique_values = length(unique(!!sym(var))),
-      all_identical = length(unique(!!sym(var))) == 1,
-      has_missing = any(is.na(!!sym(var))),
-      mean = mean(!!sym(var), na.rm = TRUE),
-      sd = sd(!!sym(var), na.rm = TRUE),
+      n       = n(),
+      mean    = mean(!!sym(dependent_vars[1])),  # chỉ lấy 1 biến phụ thuộc để group (sẽ tính lại sau)
       .groups = 'drop'
     )
   
-  cat("=" %>% rep(70) %>% paste(collapse = ""), "\n")
+  # Tính lại mean/sd/se cho từng biến phụ thuộc
+  summary_full <- dataM %>%
+    pivot_longer(cols = all_of(dependent_vars), names_to = "variable", values_to = "response") %>%
+    group_by(!!sym(independent_var), variable) %>%
+    summarise(
+      mean_resp = mean(response, na.rm = TRUE),
+      sd_resp   = sd(response, na.rm = TRUE),
+      se_resp   = sd_resp / sqrt(n()),
+      n         = n(),
+      .groups = 'drop'
+    ) %>%
+    rename(dose = !!sym(independent_var))
+  
+  cat("Bảng tóm tắt thống kê:\n")
+  print(as.data.frame(summary_full), digits = 3)
+  
+  cat(strrep("=", 70), "\n")
   cat("PHÂN TÍCH MÔ HÌNH HỒI QUY CHO CÁC BIẾN PHỤ THUỘC\n")
-  cat("=" %>% rep(70) %>% paste(collapse = ""), "\n\n")
+  cat(strrep("=", 70), "\n\n")
   
   # Lặp qua từng biến phụ thuộc
   for (dep_var in dependent_vars) {
     
-    cat("\n", "=" %>% rep(70) %>% paste(collapse = ""), "\n")
+    cat("\n", strrep("=", 70), "\n")
     cat("BIẾN PHỤ THUỘC:", dep_var, "\n")
-    cat("=" %>% rep(70) %>% paste(collapse = ""), "\n\n")
+    cat(strrep("=", 70), "\n\n")
     
-    # Kiểm tra sự tồn tại của biến
+    # Kiểm tra tồn tại cột
     if (!independent_var %in% names(dataM)) {
-      cat("⚠️  CẢNH BÁO: Biến độc lập '", independent_var, "' không tồn tại!\n")
+      cat("Lỗi: Biến độc lập '", independent_var, "' không tồn tại!\n")
       next
     }
-    
     if (!dep_var %in% names(dataM)) {
-      cat("⚠️  CẢNH BÁO: Biến phụ thuộc '", dep_var, "' không tồn tại!\n")
+      cat("Lỗi: Biến phụ thuộc '", dep_var, "' không tồn tại!\n")
       next
     }
     
-    # Chuẩn bị dữ liệu
-    data_full <- data.frame(
-      dose = dataM[[independent_var]],
-      response = dataM[[dep_var]]
-    ) %>% 
-      filter(!is.na(dose) & !is.na(response))
+    # Dữ liệu cho biến hiện tại
+    data_full <- summary_full %>%
+      filter(variable == dep_var) %>%
+      select(dose, response = mean_resp, sd = sd_resp, se = se_resp)
     
-    # Loại bỏ giá trị <= 0 cho các mô hình cần log scale
-    data_log <- data_full %>% 
-      filter(dose > 0, response > 0)
+    # Dữ liệu để fit mô hình log (loại bỏ dose <= 0 hoặc response <= 0)
+    data_log <- data_full %>% filter(dose > 0, response > 0)
     
-    if (nrow(data_full) < 3) {
-      cat("⚠️  CẢNH BÁO: Không đủ dữ liệu để fit mô hình!\n")
+    if (nrow(data_log) < 3) {
+      cat("Không đủ điểm dữ liệu (dose > 0) để fit mô hình!\n")
       next
     }
     
-    # ===== FIT CÁC MÔ HÌNH =====
+    # ==================== FIT CÁC MÔ HÌNH ====================
     models_info <- list()
     
-    # 1. Mô hình 4PL (4-Parameter Logistic)
+    # 1. 4-Parameter Logistic (4PL) - dùng package drc
     tryCatch({
-      model_4pl <- drm(response ~ dose, data = data_log, 
-                       fct = LL.4(names = c("Slope", "Lower", "Upper", "ED50")))
-      r2_4pl <- cor(data_log$response, fitted(model_4pl))^2
-      aic_4pl <- AIC(model_4pl)
-      
+      m4pl <- drm(response ~ dose, data = data_log,
+                  fct = LL.4(names = c("Slope", "Lower", "Upper", "ED50")))
       models_info[["4PL"]] <- list(
-        model = model_4pl,
-        r2 = r2_4pl,
-        aic = aic_4pl,
-        type = "nonlinear",
-        params = coef(model_4pl)
+        model = m4pl,
+        r2    = cor(data_log$response, predict(m4pl))^2,
+        aic   = AIC(m4pl),
+        type  = "nonlinear",
+        ic50  = ED50(m4pl)[1]          # lấy trực tiếp IC50 từ mô hình
       )
-    }, error = function(e) {
-      cat("⚠️  Không thể fit mô hình 4PL:", e$message, "\n")
-    })
+    }, error = function(e) cat("Không fit được 4PL:", e$message, "\n"))
     
-    # 2. Mô hình Log-Linear
+    # 2. Log-Linear
     tryCatch({
-      model_loglin <- lm(response ~ log(dose), data = data_log)
-      r2_loglin <- summary(model_loglin)$r.squared
-      aic_loglin <- AIC(model_loglin)
-      
+      mlog <- lm(response ~ log(dose), data = data_log)
       models_info[["Log-Linear"]] <- list(
-        model = model_loglin,
-        r2 = r2_loglin,
-        aic = aic_loglin,
-        type = "linear",
-        params = coef(model_loglin)
+        model = mlog,
+        r2    = summary(mlog)$r.squared,
+        aic   = AIC(mlog),
+        type  = "linear"
       )
-    }, error = function(e) {
-      cat("⚠️  Không thể fit mô hình Log-Linear:", e$message, "\n")
-    })
+    }, error = function(e) cat("Không fit được Log-Linear:", e$message, "\n"))
     
-    # 3. Mô hình Polynomial (bậc 2)
+    # 3. Polynomial bậc 2
     tryCatch({
-      model_poly2 <- lm(response ~ poly(dose, 2, raw = TRUE), data = data_full)
-      r2_poly2 <- summary(model_poly2)$r.squared
-      aic_poly2 <- AIC(model_poly2)
-      
+      mpoly <- lm(response ~ poly(dose, 2, raw = TRUE), data = data_full)
       models_info[["Polynomial"]] <- list(
-        model = model_poly2,
-        r2 = r2_poly2,
-        aic = aic_poly2,
-        type = "linear",
-        params = coef(model_poly2)
+        model = mpoly,
+        r2    = summary(mpoly)$r.squared,
+        aic   = AIC(mpoly),
+        type  = "linear"
       )
-    }, error = function(e) {
-      cat("⚠️  Không thể fit mô hình Polynomial:", e$message, "\n")
-    })
+    }, error = function(e) cat("Không fit được Polynomial:", e$message, "\n"))
     
-    # 4. Mô hình Power
+    # 4. Power model: log(y+1) ~ log(x)
     tryCatch({
-      model_power <- lm(log(response + 1) ~ log(dose), data = data_log)
-      r2_power <- summary(model_power)$r.squared
-      aic_power <- AIC(model_power)
-      
+      mpow <- lm(log(response + 1) ~ log(dose), data = data_log)
       models_info[["Power"]] <- list(
-        model = model_power,
-        r2 = r2_power,
-        aic = aic_power,
-        type = "linear",
-        params = coef(model_power)
+        model = mpow,
+        r2    = summary(mpow)$r.squared,
+        aic   = AIC(mpow),
+        type  = "linear"
       )
-    }, error = function(e) {
-      cat("⚠️  Không thể fit mô hình Power:", e$message, "\n")
-    })
+    }, error = function(e) cat("Không fit được Power:", e$message, "\n"))
     
-    # 5. Mô hình Linear
+    # 5. Linear đơn giản
     tryCatch({
-      model_linear <- lm(response ~ dose, data = data_full)
-      r2_linear <- summary(model_linear)$r.squared
-      aic_linear <- AIC(model_linear)
-      
+      mlin <- lm(response ~ dose, data = data_full)
       models_info[["Linear"]] <- list(
-        model = model_linear,
-        r2 = r2_linear,
-        aic = aic_linear,
-        type = "linear",
-        params = coef(model_linear)
+        model = mlin,
+        r2    = summary(mlin)$r.squared,
+        aic   = AIC(mlin),
+        type  = "linear"
       )
-    }, error = function(e) {
-      cat("⚠️  Không thể fit mô hình Linear:", e$message, "\n")
-    })
+    }, error = function(e) cat("Không fit được Linear:", e$message, "\n"))
     
-    # ===== SO SÁNH CÁC MÔ HÌNH =====
+    # ==================== SO SÁNH MÔ HÌNH ====================
     if (length(models_info) == 0) {
-      cat("❌ Không có mô hình nào được fit thành công!\n")
+      cat("Không có mô hình nào fit thành công!\n")
       next
     }
     
-    cat("\n----- SO SÁNH CÁC MÔ HÌNH -----\n\n")
-    
-    comparison_df <- data.frame(
+    comp_df <- data.frame(
       Model = names(models_info),
-      R2 = sapply(models_info, function(x) x$r2),
-      AIC = sapply(models_info, function(x) x$aic)
-    ) %>%
-      arrange(desc(R2))
+      R2    = sapply(models_info, function(x) x$r2 %||% NA),
+      AIC   = sapply(models_info, function(x) x$aic %||% NA),
+      stringsAsFactors = FALSE
+    ) %>% arrange(desc(R2))
     
-    print(comparison_df)
+    print(comp_df, digits = 4)
     
-    # Chọn mô hình tốt nhất
-    best_model_name <- comparison_df$Model[1]
-    best_model_info <- models_info[[best_model_name]]
+    best_name <- comp_df$Model[1]
+    best_info <- models_info[[best_name]]
     
-    cat("\n✓ MÔ HÌNH TỐT NHẤT:", best_model_name, "\n")
-    cat("  - R² =", round(best_model_info$r2, 4), "\n")
-    cat("  - AIC =", round(best_model_info$aic, 2), "\n\n")
+    cat("\nMÔ HÌNH TỐT NHẤT:", best_name,
+        sprintf("(R² = %.4f, AIC = %.1f)\n", best_info$r2, best_info$aic))
     
-    # ===== TÍNH IC50 =====
-    cat("----- TÍNH IC50 (Nồng độ tại 50% đáp ứng) -----\n\n")
+    # ==================== TÍNH IC50 CHO TẤT CẢ MÔ HÌNH ====================
+    dose_seq <- exp(seq(log(min(data_log$dose)), log(max(data_log$dose)), length.out = 300))
     
-    dose_seq <- seq(min(data_log$dose), max(data_log$dose), length.out = 200)
-    ic50_values <- list()
+    cat("\n----- IC50 của các mô hình -----\n")
+    ic50_list <- list()
     
-    for (model_name in names(models_info)) {
-      tryCatch({
-        model_obj <- models_info[[model_name]]$model
-        
-        if (models_info[[model_name]]$type == "nonlinear") {
-          # Mô hình 4PL
-          pred <- predict(model_obj, newdata = data.frame(dose = dose_seq))
-          pred <- pmin(pmax(pred, 0), 100)
-          ic50 <- dose_seq[which.min(abs(pred - 50))]
-          
-          # Hoặc lấy từ tham số ED50
-          if ("ED50" %in% names(models_info[[model_name]]$params)) {
-            ic50_param <- models_info[[model_name]]$params["ED50"]
-            cat(sprintf("  %s: IC50 = %.4f (từ ED50 parameter)\n", 
-                        model_name, ic50_param))
-          }
-          
-        } else {
-          # Các mô hình linear
-          if (model_name == "Log-Linear") {
-            pred <- predict(model_obj, newdata = data.frame(dose = dose_seq))
-          } else if (model_name == "Polynomial") {
-            pred <- predict(model_obj, newdata = data.frame(dose = dose_seq))
-          } else if (model_name == "Power") {
-            pred <- exp(predict(model_obj, newdata = data.frame(dose = dose_seq))) - 1
-          } else if (model_name == "Linear") {
-            pred <- predict(model_obj, newdata = data.frame(dose = dose_seq))
-          }
-          
-          pred <- pmin(pmax(pred, 0), 100)
-          ic50 <- dose_seq[which.min(abs(pred - 50))]
-        }
-        
-        ic50_values[[model_name]] <- ic50
-        cat(sprintf("  %s: IC50 ≈ %.4f\n", model_name, ic50))
-        
-      }, error = function(e) {
-        cat(sprintf("  %s: Không thể tính IC50\n", model_name))
-      })
-    }
-    
-    # ===== VẼ BIỂU ĐỒ =====
-    cat("\n----- VẼ BIỂU ĐỒ SO SÁNH -----\n")
-    
-    # Tạo dữ liệu dự đoán cho tất cả các mô hình
-    plot_data_list <- list()
-    
-    # Dữ liệu quan sát
-    plot_data_list[[1]] <- data.frame(
-      dose = data_full$dose,
-      response = data_full$response,
-      model = "Observed",
-      type = "observed"
-    )
-    
-    # Dự đoán từ các mô hình
-    for (model_name in names(models_info)) {
-      tryCatch({
-        model_obj <- models_info[[model_name]]$model
-        
-        if (models_info[[model_name]]$type == "nonlinear") {
-          pred <- predict(model_obj, newdata = data.frame(dose = dose_seq))
-        } else if (model_name == "Log-Linear") {
-          pred <- predict(model_obj, newdata = data.frame(dose = dose_seq))
-        } else if (model_name == "Polynomial") {
-          pred <- predict(model_obj, newdata = data.frame(dose = dose_seq))
-        } else if (model_name == "Power") {
-          pred <- exp(predict(model_obj, newdata = data.frame(dose = dose_seq))) - 1
-        } else if (model_name == "Linear") {
-          pred <- predict(model_obj, newdata = data.frame(dose = dose_seq))
-        }
-        
-        pred <- pmin(pmax(pred, 0), 100)
-        
-        plot_data_list[[length(plot_data_list) + 1]] <- data.frame(
-          dose = dose_seq,
-          response = pred,
-          model = model_name,
-          type = "fitted"
+    for (mname in names(models_info)) {
+      obj <- models_info[[mname]]$model
+      
+      if (mname == "4PL") {
+        ic50_val <- models_info[[mname]]$ic50
+        cat(sprintf("  %s: IC50 = %.4f\n", mname, ic50_val))
+      } else {
+        pred <- switch(mname,
+                       "Log-Linear" = predict(obj, newdata = data.frame(dose = dose_seq)),
+                       "Polynomial" = predict(obj, newdata = data.frame(dose = dose_seq)),
+                       "Power"      = exp(predict(obj, newdata = data.frame(dose = dose_seq))) - 1,
+                       "Linear"     = predict(obj, newdata = data.frame(dose = dose_seq)),
+                       predict(obj, newdata = data.frame(dose = dose_seq))
         )
-      }, error = function(e) {})
+        pred <- pmax(pmin(pred, 120), -10)  # giới hạn hợp lý
+        ic50_val <- dose_seq[which.min(abs(pred - 50))]
+        cat(sprintf("  %s: IC50 ≈ %.4f\n", mname, ic50_val))
+      }
+      ic50_list[[mname]] <- ic50_val %||% NA
     }
     
-    plot_data <- do.call(rbind, plot_data_list)
+    # ==================== VẼ ĐỒ THỊ ====================
+    plot_data <- data_full[, c("dose", "response")]
+    plot_data$type <- "Observed"
+    plot_data$model <- "Observed"
     
-    # Vẽ biểu đồ
-    p <- ggplot() +
-      geom_point(data = subset(plot_data, type == "observed"),
-                 aes(x = dose, y = response),
-                 size = 3, color = "black", alpha = 0.6) +
-      geom_line(data = subset(plot_data, type == "fitted"),
-                aes(x = dose, y = response, color = model, linetype = model),
-                size = 1) +
-      geom_hline(yintercept = 50, linetype = "dashed", 
-                 color = "darkred", size = 0.8, alpha = 0.7) +
-      annotate("text", x = min(data_full$dose) * 1.2, y = 52,
-               label = "50%", color = "darkred", size = 3.5, fontface = "bold") +
-      scale_x_log10() +
-      coord_cartesian(ylim = c(0, max(data_full$response) * 1.1)) +
+    pred_all <- data.frame(dose = dose_seq)
+    
+    for (mname in names(models_info)) {
+      obj <- models_info[[mname]]$model
+      pred <- switch(mname,
+                     "4PL"        = predict(obj, newdata = data.frame(dose = dose_seq)),
+                     "Log-Linear" = predict(obj, newdata = data.frame(dose = dose_seq)),
+                     "Polynomial" = predict(obj, newdata = data.frame(dose = dose_seq)),
+                     "Power"      = exp(predict(obj, newdata = data.frame(dose = dose_seq))) - 1,
+                     "Linear"     = predict(obj, newdata = data.frame(dose = dose_seq))
+      )
+      pred_all[[mname]] <- pmax(pmin(pred, 120), 0)
+    }
+    
+    pred_long <- pred_all %>%
+      pivot_longer(-dose, names_to = "model", values_to = "response") %>%
+      mutate(type = "Fitted")
+    
+    plot_df <- bind_rows(plot_data, pred_long)
+    
+    p <- ggplot(plot_df, aes(x = dose)) +
+      geom_point(data = subset(plot_df, type == "Observed"),
+                 aes(y = response), size = 3, color = "black") +
+      geom_line(data = subset(plot_df, type == "Fitted"),
+                aes(y = response, color = model, linetype = model), size = 1.1) +
+      geom_hline(yintercept = 50, linetype = "dashed", color = "red") +
+      scale_x_log10(labels = scales::comma) +
       labs(
-        title = paste("So sánh các mô hình hồi quy -", dep_var),
-        subtitle = sprintf("Mô hình tốt nhất: %s (R² = %.4f)", 
-                           best_model_name, best_model_info$r2),
+        title = paste("So sánh mô hình -", dep_var),
+        subtitle = sprintf("Tốt nhất: %s (R² = %.4f)", best_name, best_info$r2),
         x = paste("Nồng độ", independent_var),
         y = paste("Đáp ứng", dep_var, "(%)"),
-        color = "Mô hình",
-        linetype = "Mô hình"
+        color = "Mô hình", linetype = "Mô hình"
       ) +
       theme_minimal(base_size = 12) +
-      theme(
-        plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
-        plot.subtitle = element_text(hjust = 0.5, size = 11),
-        legend.position = "right",
-        panel.grid.minor = element_blank(),
-        panel.border = element_rect(color = "black", fill = NA, size = 0.8)
-      )
+      theme(legend.position = "right",
+            plot.title = element_text(hjust = 0.5, face = "bold"))
     
-    # Thêm IC50 của mô hình tốt nhất
-    if (!is.null(ic50_values[[best_model_name]])) {
-      best_ic50 <- ic50_values[[best_model_name]]
+    # Thêm đường IC50 của mô hình tốt nhất
+    if (!is.na(ic50_list[[best_name]])) {
+      ic50_best <- ic50_list[[best_name]]
       p <- p +
-        geom_vline(xintercept = best_ic50, linetype = "dotted",
-                   color = "blue", size = 0.8, alpha = 0.7) +
-        geom_point(aes(x = best_ic50, y = 50),
-                   color = "blue", size = 5, shape = 18) +
-        annotate("text", x = best_ic50 * 1.5, y = 45,
-                 label = sprintf("IC50 ≈ %.3f", best_ic50),
-                 color = "blue", size = 3.5, fontface = "bold")
+        geom_vline(xintercept = ic50_best, linetype = "dotdash", color = "blue", size = 1) +
+        annotate("text", x = ic50_best, y = 60, label = sprintf("IC50 = %.3f", ic50_best),
+                 color = "blue", angle = 90, vjust = -0.5, fontface = "bold")
     }
     
     print(p)
     
-    # Lưu biểu đồ
     if (save_plots) {
-      filename <- file.path(output_dir, paste0(dep_var, "_model_comparison.png"))
-      ggsave(filename, plot = p, width = 10, height = 6, dpi = 300)
-      cat("✓ Biểu đồ đã được lưu:", filename, "\n")
+      ggsave(filename = file.path(output_dir, paste0(dep_var, "_comparison.png")),
+             plot = p, width = 11, height = 7, dpi = 300)
+      cat("Đã lưu biểu đồ:", file.path(output_dir, paste0(dep_var, "_comparison.png")), "\n")
     }
     
     all_plots[[dep_var]] <- p
     
-    # Lưu kết quả
     results_list[[dep_var]] <- list(
-      models = models_info,
-      best_model = best_model_name,
-      best_r2 = best_model_info$r2,
-      best_aic = best_model_info$aic,
-      ic50_values = ic50_values,
-      comparison = comparison_df,
-      plot = p
+      data_summary = data_full,
+      models       = models_info,
+      comparison   = comp_df,
+      best_model   = best_name,
+      ic50         = ic50_list,
+      plot         = p
     )
   }
   
-  cat("\n", "=" %>% rep(70) %>% paste(collapse = ""), "\n")
-  cat("HOÀN THÀNH PHÂN TÍCH!\n")
-  cat("=" %>% rep(70) %>% paste(collapse = ""), "\n\n")
+  cat("\n", strrep("=", 70), "\n")
+  cat("HOÀN THÀNH PHÂN TÍCH TOÀN BỘ!\n")
+  cat(strrep("=", 70), "\n")
   
-  return(invisible(list(
-    results = results_list,
-    plots = all_plots
-  )))
+  invisible(list(results = results_list, plots = all_plots))
 }
 
-
-# Thực hiện ví dụ
-results <- check_models(
-  dataM = data3 ,
+# ==================== CHẠY HÀM ====================
+# Ví dụ sử dụng (thay tên cột cho đúng với data của bạn)
+check_models(
+  dataM = data10 ,
   independent_var = "Conc",
   dependent_vars = c("24h","1D", "2D","5D"),
   output_dir = "models_results",
