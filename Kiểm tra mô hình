@@ -15,31 +15,42 @@ check_models <- function(dataM,
   if (save_plots && !dir.exists(output_dir)) {
     dir.create(output_dir, recursive = TRUE)
   }
-  
+
+# Khởi tạo danh sách lưu kết quả
   results_list <- list()
-  all_plots    <- list()
+  all_plots <- list()
   
-  # ==================== TÓM TẮT THỐNG KÊ ====================
-  data_summary <- dataM %>%
-    group_by(!!sym(independent_var)) %>%
-    summarise(
-      n       = n(),
-      mean    = mean(!!sym(dependent_vars[1])),  # chỉ lấy 1 biến phụ thuộc để group (sẽ tính lại sau)
-      .groups = 'drop'
-    )
+  cat("=" %>% rep(70) %>% paste(collapse = ""), "\n")
+  cat("PHÂN TÍCH MÔ HÌNH HỒI QUY CHO CÁC BIẾN PHỤ THUỘC\n")
+  cat("=" %>% rep(70) %>% paste(collapse = ""), "\n\n")
   
-  # Tính lại mean/sd/se cho từng biến phụ thuộc
-  summary_full <- dataM %>%
-    pivot_longer(cols = all_of(dependent_vars), names_to = "variable", values_to = "response") %>%
-    group_by(!!sym(independent_var), variable) %>%
-    summarise(
-      mean_resp = mean(response, na.rm = TRUE),
-      sd_resp   = sd(response, na.rm = TRUE),
-      se_resp   = sd_resp / sqrt(n()),
-      n         = n(),
-      .groups = 'drop'
-    ) %>%
-    rename(dose = !!sym(independent_var))
+  # Lặp qua từng biến phụ thuộc
+  for (dep_var in dependent_vars) {
+    
+    cat("\n", "=" %>% rep(70) %>% paste(collapse = ""), "\n")
+    cat("BIẾN PHỤ THUỘC:", dep_var, "\n")
+    cat("=" %>% rep(70) %>% paste(collapse = ""), "\n\n")
+    
+    # Kiểm tra sự tồn tại của biến
+    if (!independent_var %in% names(dataM)) {
+      cat("⚠️  CẢNH BÁO: Biến độc lập '", independent_var, "' không tồn tại!\n")
+      next
+    }
+    
+    if (!dep_var %in% names(dataM)) {
+      cat("⚠️  CẢNH BÁO: Biến phụ thuộc '", dep_var, "' không tồn tại!\n")
+      next
+    }
+    
+    # Tính toán thống kê cho từng nhóm
+    data_summary <- dataM %>%
+      group_by(!!sym(independent_var)) %>%
+      summarise(
+        mean_dpv = mean(!!sym(dep_var), na.rm = TRUE),
+        sd_dpv = sd(!!sym(dep_var), na.rm = TRUE),
+        se_dpv = sd(!!sym(dep_var), na.rm = TRUE) / sqrt(n()),
+        .groups = 'drop'
+      )
   
   cat("Bảng tóm tắt thống kê:\n")
   print(as.data.frame(summary_full), digits = 3)
